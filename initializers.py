@@ -3,14 +3,20 @@ import numpy as np
 
 class Zeros():
 
-    def __call__(self, shape, dtype=None):
-        return np.zeros_like(shape)
+    def __init__(self):
+        pass
+
+    def __call__(self, shape, dtype=None, **kwargs):
+        return np.zeros(shape)
 
 
 class Ones():
 
-    def __call__(self, shape, dtype=None):
-        return np.ones_like(shape)
+    def __init__(self):
+        pass
+
+    def __call__(self, shape, dtype=None, **kwargs):
+        return np.ones(shape)
 
 
 class Constant():
@@ -18,8 +24,8 @@ class Constant():
     def __init__(self, value=0):
         self.value = value
 
-    def __call__(self, shape, dtype=None):
-        return np.ones_like(shape) * self.value
+    def __call__(self, shape, dtype=None, **kwargs):
+        return np.ones(shape) * self.value
 
 
 class RandomNormal():

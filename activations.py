@@ -52,7 +52,7 @@ class activations:
         return x/(abs(x) + 1)
 
     @classmethod
-    def relu(cls, x, alpha=0., max_value=None, threshold=0.):
+    def relu(cls, x, alpha=0.01, max_value=None, threshold=0.):
         x = cls.__pre_check(x)
         x[x <= threshold] = alpha * (x[x <= threshold] - threshold)
         if max_value is None:
