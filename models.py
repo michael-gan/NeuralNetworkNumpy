@@ -1,13 +1,16 @@
 from initializers import *
 from optimizers import *
+from regularizers import *
 from metrics import *
 from functools import partial
+from collections import Iterable
 from sklearn.datasets import load_boston, california_housing, load_iris
 from sklearn.neural_network import MLPRegressor, MLPClassifier
 from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
 import joblib
 import time
+import os
 import gc
 
 
@@ -24,7 +27,8 @@ class neural_network(object):
         :param kwargs: dict
         """
         allowed_kwargs = ["layer_schema", "input_shape", "learning_rate", "max_iter", "lambda", "activations",
-                          "output_layer", "dropout", "combination_method", "decay"]
+                          "output_layer", "combination_method", "decay", "dropout_schema", "l1_reg", "l2_reg",
+                          "l1_l2_reg"]
         for kwarg in kwargs:
             if kwarg not in allowed_kwargs:
                 raise TypeError('Keyword argument not understood:', kwarg)
@@ -37,8 +41,7 @@ class neural_network(object):
         self.weights = {}
         self.bias = {}
         self.activations = {}
-        self.dropout = {}
-        self._trace_history = {"loss": np.inf, "params": {"weights": None, "bias": None}}
+        self.__trace_history = {"loss": np.inf, "params": {"weights": None, "bias": None}}
         self.optimizer = None
         self.loss = None
         if "layer_schema" not in kwargs:
@@ -55,17 +58,21 @@ class neural_network(object):
             if not isinstance(kwargs["layer_schema"], tuple):
                 raise TypeError("type of neural network schema should be tuple, but not %s",
                                 type(kwargs["layer_schema"]))
-        if "dropout" in kwargs:
-            if not isinstance(kwargs["dropout"], tuple):
+        if "dropout_schema" in kwargs:
+            if not isinstance(kwargs["dropout_schema"], tuple):
                 raise TypeError("dropout layer schema should be tuple, but not %s",
-                                type(kwargs["layer_schema"]))
+                                type(kwargs["dropout_schema"]))
+            if len(kwargs["dropout_schema"]) != len(kwargs["layer_schema"]):
+                raise ValueError("dropout layer schema should be the same as network schema, e.g. layer schama (32,"
+                                 "32, 16), dropout layer schema should be (0, 0.2, 0.3)")
             else:
-                if np.any(list(map(lambda x: x < 0 or x > 1, kwargs["dropout"]))):
-                    raise ValueError("dropout rate should be in range (0,1)")
-                self.dropout = dict(
-                    [("layer_%r" % (i + 1), kwargs["dropout"][i]) for i in range(self.num_hidden_layers)])
+                if np.any(list(map(lambda x: x < 0 or x >= 1, kwargs["dropout_schema"]))):
+                    raise ValueError("dropout rate should be in range [0,1)")
+                self.dropout_schema = dict(
+                    [("layer_%r" % (i + 1), kwargs["dropout_schema"][i]) for i in range(len(kwargs["layer_schema"]))])
         else:
-            self.dropout = dict([("layer_%r" % (i + 1), 0) for i in range(self.num_hidden_layers)])
+            self.dropout_schema = dict(
+                [("layer_%r" % (i + 1), 0) for i in range(len(kwargs["layer_schema"]))])
         if "learning_rate" not in kwargs:
             self.learning_rate = 1e-2
         else:
@@ -85,6 +92,21 @@ class neural_network(object):
             self.decay = kwargs["decay"]
         else:
             self.decay = 1.
+        if "l1_reg" in kwargs:
+            self.l1 = kwargs["l1_reg"]
+        else:
+            self.l1 = 0.
+        if "l2_reg" in kwargs:
+            self.l2 = kwargs["l2_reg"]
+        else:
+            self.l2 = 0.
+        if "l1_l2_reg" in kwargs:
+            assert isinstance(kwargs["l1_l2_reg"], Iterable), "value of l1_l2_reg should be iterable object"
+            assert len(kwargs["l1_l2_reg"]) == 2, "length of l1_l2_reg value should be 2, but not %r" % len(
+                kwargs["l1_l2_reg"])
+            self.l1_l2 = kwargs["l1_l2_reg"]
+        else:
+            self.l1_l2 = (0., 0.)
 
     def _neural_network_init(self, input_shape, initilizer):
         if self.weights == {}:
@@ -151,16 +173,17 @@ class neural_network(object):
             predict = self.__forward(data)
             if predict.shape[0] > 1:
                 predict = predict / np.sum(predict, axis=0, keepdims=True)
-            temp_loss = np.mean(self.loss(target.T, predict.T))
+            temp_loss = np.mean(self.loss(target.T, predict.T)) + self.__reg_loss / data.shape[1]
             self.loss_history.append(temp_loss)
             self._trace_back(temp_loss)
 
             if verbose:
                 if (i + 1) % 10 == 0:
                     print("epoches %d / %r, loss: %r" % (i + 1, self.epochs, self.loss_history[-1]))
-        self.weights, self.bias = joblib.load("weights.pkl"), joblib.load("bias.pkl")
+        self.weights, self.bias = joblib.load("./mdl/weights.pkl"), joblib.load("./mdl/bias.pkl")
         temp_var_clean(self.__temp_z)
-        temp_var_clean(self._trace_history)
+        temp_var_clean(self.__trace_history)
+        temp_var_clean(self.__reg_loss)
         return self
 
     def predict(self, test_data):
@@ -169,11 +192,22 @@ class neural_network(object):
         return predict
 
     def __forward(self, data):
+        self.__reg_loss = 0.
         self.__temp_z = {"layer_0": data}
         for i in range(self.num_hidden_layers):
+            if i != self.num_hidden_layers - 1:
+                dropout_rate = self.dropout_schema["layer_%r" % (i + 1)]
+                data = dropout(data, dropout_rate)
             data = self.activations["layer_%r" % (i + 1)](
                 self.combination_method(x=data, w=self.weights["layer_%r" % (i + 1)], b=self.bias["layer_%r" % (i + 1)])
             )
+
+            ###########################################################################################
+            self.__reg_loss += (l1_regularization(self.weights["layer_%r" % (i + 1)], self.l1) +
+                                l2_regularization(self.weights["layer_%r" % (i + 1)], self.l2) +
+                                l1_l2_regularization(self.weights["layer_%r" % (i + 1)], *self.l1_l2)) / data.shape[1]
+            ############################################################################################
+
             self.__temp_z["layer_%r" % (i + 1)] = data
         return data
 
@@ -188,7 +222,9 @@ class neural_network(object):
             temp_dz = grad_a * temp_d_activation / target.shape[1]
             temp_d_combination_dw = self.__temp_z["layer_%r" % (i - 1)]
             temp_d_combination_da = self.weights["layer_%r" % i]
-            temp_dw = temp_dz.dot(temp_d_combination_dw.T)
+            temp_dw = temp_dz.dot(temp_d_combination_dw.T) + \
+                      (self.l1 + self.l1_l2[0] + (self.l2 + self.l1_l2[1]) * self.weights["layer_%r" % i]) / \
+                      target.shape[1]
             temp_db = np.sum(temp_dz, axis=1, keepdims=True)
             grad_a = temp_d_combination_da.T.dot(temp_dz)
             dw.append(temp_dw)
@@ -210,7 +246,9 @@ class neural_network(object):
                 temp_dz = grad_a * temp_d_activation / target.shape[1]
             temp_d_combination_dw = self.__temp_z["layer_%r" % (i - 1)]
             temp_d_combination_da = self.weights["layer_%r" % i]
-            temp_dw = temp_dz.dot(temp_d_combination_dw.T)
+            temp_dw = temp_dz.dot(temp_d_combination_dw.T) + \
+                      (self.l1 + self.l1_l2[0] + (self.l2 + self.l1_l2[1]) * self.weights["layer_%r" % i]) / \
+                      target.shape[1]
             temp_db = np.sum(temp_dz, axis=1, keepdims=True)
             grad_a = temp_d_combination_da.T.dot(temp_dz)
             dw.append(temp_dw)
@@ -218,10 +256,12 @@ class neural_network(object):
         return dw, db
 
     def _trace_back(self, loss):
-        if loss < self._trace_history["loss"]:
-            self._trace_history["loss"] = loss
-            joblib.dump(self.weights, "weights.pkl")
-            joblib.dump(self.bias, "bias.pkl")
+        if loss < self.__trace_history["loss"]:
+            self.__trace_history["loss"] = loss
+            if not os.path.exists("./mdl"):
+                os.mkdir("./mdl")
+            joblib.dump(self.weights, "./mdl/weights.pkl")
+            joblib.dump(self.bias, "./mdl/bias.pkl")
 
 
 class neural_network_regression(neural_network):
@@ -239,7 +279,8 @@ class neural_network_regression(neural_network):
     def __re_init(self):
         self.__init__(**self.__init_para)
 
-    def fit(self, data, target, batch_size=None, epochs=None, optimizer=None, initilizer=None, loss=None, verbose=False, **kwargs):
+    def fit(self, data, target, batch_size=None, epochs=None, optimizer=None, initilizer=None, loss=None, verbose=False,
+            **kwargs):
         self.__re_init()
         if loss is None:
             self.loss = loss_function.mean_squared_error
@@ -288,7 +329,8 @@ class neural_network_classification(neural_network):
         predict = np.array(self.classes).repeat(n_predict).T.reshape(self.n_classes, n_predict)
         return predict[index, np.arange(n_predict)]
 
-    def fit(self, data, target, batch_size=None, epochs=None, optimizer=None, initilizer=None, loss=None, verbose=False, **kwargs):
+    def fit(self, data, target, batch_size=None, epochs=None, optimizer=None, initilizer=None, loss=None, verbose=False,
+            **kwargs):
         self.__re_init()
         if loss is None:
             self.loss = loss_function.categorical_crossentropy
@@ -310,20 +352,28 @@ class neural_network_classification(neural_network):
 
 
 if __name__ == '__main__':
-    model = neural_network_classification(layer_schema=(32, 32, 32), output_layer=activations.sigmoid,
+    model = neural_network_regression(layer_schema=(32, 32, 32),
+                                      output_layer=activations.relu,
                                       activations=(activations.tanh, activations.tanh, activations.tanh),
-                                      learning_rate=5 * 1e-3)
+                                      learning_rate=5 * 1e-3,
+                                      # l1_reg=0.00001,
+                                      # l2_reg=0.00001,
+                                      # l1_l2_reg=(0.001, 0.01),
+                                      # dropout_schema=(0.2, 0.3, 0.2),
+                                      )
     # model = MLPClassifier((32, 32, 32))
     # train, target = california_housing.fetch_california_housing(return_X_y=True)[0], california_housing.fetch_california_housing(return_X_y=True)[1]
-    # train, target = load_boston(return_X_y=True)[0], load_boston(return_X_y=True)[1]
-    train, target = load_iris(return_X_y=True)[0], load_iris(return_X_y=True)[1]
+    train, target = load_boston(return_X_y=True)[0], load_boston(return_X_y=True)[1]
+    # train, target = load_iris(return_X_y=True)[0], load_iris(return_X_y=True)[1]
     scale = StandardScaler()
     train = scale.fit_transform(train)
-    model.fit(train, target, loss=loss_function.cosine_proximity)
+    model.fit(train, target, loss=loss_function.mean_squared_error)
     from sklearn.metrics import mean_squared_error, accuracy_score
+
     # print("loss history", model.loss_history)
-    # print(accuracy_score(model.predict(train).ravel(), target))
-    print(model.predict(train))#.shape)
+    print(mean_squared_error(model.predict(train).ravel(), target))
+    print(model.predict(train))  # .shape)
+    print(model.loss_history)
     plt.figure()
     plt.plot(target)
     plt.plot(model.predict(train).ravel())
